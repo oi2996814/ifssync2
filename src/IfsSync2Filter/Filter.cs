@@ -9,8 +9,6 @@
 * KSAN 개발팀은 사전 공지, 허락, 동의 없이 KSAN 개발에 관련된 모든 결과물에 대한 LICENSE 방식을 변경 할 권리가 있습니다.
 */
 using log4net;
-using log4net.Config;
-using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
@@ -18,89 +16,80 @@ using IfsSync2Data;
 
 namespace IfsSync2Filter
 {
-    public class Filter
-    {
-        private static readonly int FILTER_CHECK_DELAY = 5000;
-        private static readonly ILog log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+	public class Filter(bool global)
+	{
+		const int FILTER_CHECK_DELAY = 5000;
 
-        public List<FilterThread> FilterList;
+		readonly ILog _log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+		readonly List<FilterThread> _filters = [];
+		readonly JobDbManager _jobDb = new();
+		readonly bool _global = global;
 
-        private readonly string RootPath;
-        private readonly JobDataSqlManager JobSQL;
-        private readonly bool Global;
-        public Filter(string _RootPath, bool _Global)
-        {
-            Global = _Global;
-            RootPath = _RootPath;
-            FilterList = new List<FilterThread>();
-            JobSQL = new JobDataSqlManager(RootPath);
-        }
+		public void CheckOnce()
+		{
+			FilterThreadAliveInit();
+			var jobs = _jobDb.GetJobs(_global);
 
-        public void CheckOnce()
-        {
-            FilterThreadAliveInit();
-            List<JobData> TempJobList = JobSQL.GetJobDatas(Global);
+			foreach (var job in jobs)
+			{
+				if (job.JobName.Equals(MainData.INSTANT_BACKUP_NAME)) continue;
+				bool isNewFilter = true;
+				//if new or change
+				foreach (var Filter in _filters)
+				{
+					if (Filter.IsAlive) continue;
 
-            foreach (JobData Item in TempJobList)
-            {
-                if (Item.JobName.Equals(MainData.INSTANT_BACKUP_NAME)) continue;
-                bool IsNewFilter = true;
-                //if new or change
-                foreach (FilterThread Filter in FilterList)
-                {
-                    if (Filter.IsAlive) continue;
+					if (job.Id == Filter.Job.Id)
+					{
+						isNewFilter = false;
+						Filter.IsAlive = true;
+						//JobData is Changed.
+						if (job.FilterUpdate)
+						{
+							job.FilterUpdate = false;
+							Filter.JobDataUpdate(job);
+							_jobDb.UpdateFilterCheck(job, _global);
+						}
+						break;
+					}
+				}
 
-                    if (Item.ID == Filter.Job.ID)
-                    {
-                        IsNewFilter = false;
-                        Filter.IsAlive = true;
-                        //JobData is Changed.
-                        if (Item.FilterUpdate)
-                        {
-                            Item.FilterUpdate = false;
-                            Filter.JobDataUpdate(Item);
-                            JobSQL.UpdateFilterCheck(Item, Global);
-                        }
-                        break;
-                    }
-                }
+				//JobThread is not existed. Create JobThread
+				if (isNewFilter) _filters.Add(new FilterThread(job));
+			}
 
-                //JobThread is not existed. Create JobThread
-                if (IsNewFilter) FilterList.Add(new FilterThread(RootPath, Item));
-            }
+			for (int i = _filters.Count - 1; i >= 0; i--)
+			{
+				if (!_filters[i].IsAlive)
+				{
+					_filters[i].Close();
+					_filters.RemoveAt(i);
+					continue;
+				}
+				else _filters[i].FilterStateOn();
 
-            for (int i = FilterList.Count - 1; i >= 0; i--)
-            {
-                if (!FilterList[i].IsAlive)
-                {
-                    FilterList[i].Close();
-                    FilterList.RemoveAt(i);
-                    continue;
-                }
-                else FilterList[i].FilterStateOn();
+				if (!_filters[i].IsFilterUpdate) _filters[i].FilterUpdate();
+			}
 
-                if (!FilterList[i].IsFilterUpdate) FilterList[i].FilterUpdate();
-            }
+			Thread.Sleep(FILTER_CHECK_DELAY);
+		}
 
-            Thread.Sleep(FILTER_CHECK_DELAY);
-        }
+		public void Stop()
+		{
+			FilterThreadAllDelete();
+			_log.Info("Stop");
+		}
 
-        public void Stop()
-        {
-            FilterThreadAllDelete();
-            log.Info("Stop");
-        }
+		void FilterThreadAliveInit()
+		{
+			foreach (var Job in _filters) Job.IsAlive = false;
+		}
+		void FilterThreadAllDelete()
+		{
+			foreach (var Job in _filters) Job.Close();
+			_filters.Clear();
+		}
 
-        private void FilterThreadAliveInit()
-        {
-            foreach (FilterThread Job in FilterList) Job.IsAlive = false;
-        }
-        private void FilterThreadAllDelete()
-        {
-            foreach (FilterThread Job in FilterList) Job.Close();
-            FilterList.Clear();
-        }
-        
-    }
+	}
 
 }
